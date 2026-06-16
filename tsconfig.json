@@ -7,7 +7,8 @@
 		"noImplicitAny": true,
 		"outDir": "./built",
 		"strict": false,
-		"target": "es2017"
+		"target": "es2017",
+		"allowImportingTsExtensions": true,
 	},
 	"include": ["./index.ts"],
 	"exclude": ["./**/*.d.ts"]
