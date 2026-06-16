@@ -1,23 +1,21 @@
-import * as fontoxpath from "fontoxpath";
+import fontoxpath from "fontoxpath";
 import { glob, readFile } from "fs/promises";
-import { DOMParser, Document, Element, document } from "slimdom";
-import { namespaceResolver } from "../util/util.ts";
+import { DOMParser, Document, Element } from "slimdom";
+
+import { type NonTerminal, XQuery31Full } from "xq-parser";
 
 const {
-  evaluateXPath,
   evaluateXPathToFirstNode,
   evaluateXPathToNodes,
   evaluateXPathToString,
   evaluateXPathToStrings,
-  parseScript,
 } = fontoxpath;
 
 function getLineNumber(contents: string, index: number): number {
   return [...contents.substring(0, index).matchAll(/\n/g)].length;
 }
 
-type FunctionLocation = { filename: string; line: number };
-type FunctionCalls = { name: string; calls: Element[] };
+type FunctionLocation = { filename: string; line: number; contents: string };
 
 function mergeIntoMap(map: Map<string, string[]>, key: string, value: string) {
   if (!map.has(key)) {
@@ -26,79 +24,102 @@ function mergeIntoMap(map: Map<string, string[]>, key: string, value: string) {
   map.get(key)!.push(value);
 }
 
-async function scanXQueryFile(
+function parseXQueryToDocument(contents: string): Document {
+  const parsed = XQuery31Full(contents);
+  const newDocument = new Document();
+  const toDocument = (node: NonTerminal): Element => {
+    const ele = newDocument.createElement(node.type);
+    ele.setAttribute("start", `${node.start}`);
+    ele.setAttribute("end", `${node.end}`);
+    for (const child of node.children) {
+      if (child.isTerminal) {
+        ele.appendChild(newDocument.createTextNode(child.value));
+      } else {
+        ele.appendChild(toDocument(child as NonTerminal));
+      }
+    }
+
+    return ele;
+  };
+
+  const root = toDocument(parsed.ast);
+  newDocument.appendChild(root);
+  return newDocument;
+}
+
+// xq-parser keeps string literals as raw source text, quotes included, with
+// the quote character doubled to escape it (the XQuery string literal rule).
+function unescapeStringLiteral(rawText: string): string {
+  const quote = rawText[0];
+  return rawText
+    .slice(1, -1)
+    .split(quote + quote)
+    .join(quote);
+}
+
+export async function scanXQueryFile(
   entry: string,
+  contents: string,
   unknownFunctionLocations: FunctionLocation[],
   foundStringParameters: Map<string, string[]>,
 ) {
-  const contents = await readFile(entry, "utf-8");
-
-  if (!contents.includes("i18n:get-display-value-for-key")) {
+  if (!contents.includes("i18n:getLocalizedTextForKey")) {
     return;
   }
-  const matches = [...contents.matchAll(/i18n:get-display-value-for-key/g)];
 
-  if (!matches.length) {
-    throw new Error(contents);
-  }
-
-  let script: Element;
+  let script: Document;
   try {
-    script = parseScript(
-      contents,
-      { language: evaluateXPath.XQUERY_3_1_LANGUAGE },
-      document,
-    );
+    script = parseXQueryToDocument(contents);
   } catch (e) {
     console.warn(e);
-    for (const match of matches) {
-      unknownFunctionLocations.push({
-        filename: entry,
-        line: getLineNumber(contents, match.index),
-      });
-    }
+    unknownFunctionLocations.push({
+      filename: entry,
+      line: -1,
+      contents: "",
+    });
     return;
   }
 
   let i = -1;
 
-  for (const call of evaluateXPathToNodes(
-    'descendant-or-self::functionCallExpr[functionName = "get-display-value-for-key"]',
+  for (const call of evaluateXPathToNodes<Element>(
+    'descendant-or-self::FunctionCall[matches(FunctionEQName, "(^|:)getLocalizedTextForKey$")]',
     script,
-    null,
-    null,
-    {
-      namespaceResolver,
-    },
   )) {
     i++;
     const param = evaluateXPathToFirstNode<Element>(
-      "descendant::arguments/*",
+      "descendant::ArgumentList/Argument[1]//PrimaryExpr[1]/*",
       call,
-      null,
-      null,
-      { namespaceResolver },
     );
-    switch (param!.localName) {
-      case "stringConstantExpr":
-        mergeIntoMap(
-          foundStringParameters,
-          evaluateXPathToString(".", param),
-          entry,
-        );
-        break;
+    const rawText = param ? evaluateXPathToString(".", param) : "";
+    switch (param?.localName) {
+      case "Literal":
+        if (rawText.startsWith('"') || rawText.startsWith("'")) {
+          mergeIntoMap(
+            foundStringParameters,
+            unescapeStringLiteral(rawText),
+            entry,
+          );
+          break;
+        }
+      // falls through for non-string literals (numeric, boolean, ...)
       default:
         try {
-          const line = getLineNumber(contents, matches[i].index);
+          const start = parseInt(call.getAttribute("start"));
+          const end = parseInt(call.getAttribute("end"));
+          const line = getLineNumber(contents, start);
 
-          unknownFunctionLocations.push({ filename: entry, line });
+          unknownFunctionLocations.push({
+            filename: entry,
+            line,
+            contents: contents.substring(start, end),
+          });
         } catch (e) {
-          console.log(matches, i, entry);
+          console.log(call, i, entry);
           throw e;
         }
     }
   }
-  1;
 }
 
 async function scanHtmlFile(
@@ -123,6 +144,7 @@ async function scanHtmlFile(
       ...matches.map((_match, i) => ({
         filename: entry,
         line: getLineNumber(contents, i),
+        contents: "",
       })),
     );
     return;
@@ -133,7 +155,7 @@ async function scanHtmlFile(
         'data-filter-trigger-label-selected',
         'data-filter-button-submit',
         'data-filter-button-reset',
-'data-filter-button-cancel')]`,
+        'data-filter-button-cancel')]`,
     html,
     null,
     {},
@@ -154,7 +176,12 @@ export async function scanForLocalization(globString: string): Promise<void> {
     if (entry.endsWith("html")) {
       scanHtmlFile(entry, unknownFunctionLocations, foundStringParameters);
     } else if (entry.endsWith(".xqm") || entry.endsWith(".xql")) {
-      scanXQueryFile(entry, unknownFunctionLocations, foundStringParameters);
+      scanXQueryFile(
+        entry,
+        await readFile(entry, "utf-8"),
+        unknownFunctionLocations,
+        foundStringParameters,
+      );
     }
   }
 
@@ -171,6 +198,8 @@ export async function scanForLocalization(globString: string): Promise<void> {
   //	console.table(unknownFunctionLocations);
 
   console.log(
-    unknownFunctionLocations.map((x) => x.filename + "; " + x.line).join("\n"),
+    unknownFunctionLocations
+      .map((x) => `${x.filename}; ${x.contents}; ${x.line}`)
+      .join("\n"),
   );
 }

@@ -2,13 +2,15 @@
 	"compilerOptions": {
 		"baseUrl": ".",
 		"declaration": true,
+		"moduleResolution": "bundler",
+		"strict": true,
 		"lib": ["es6", "es2017", "esnext.asynciterable"],
-		"module": "commonjs",
+		"module": "ESNext",
 		"noImplicitAny": true,
 		"outDir": "./built",
 		"strict": false,
-		"target": "es2017",
-		"allowImportingTsExtensions": true,
+		"target": "ESNext",
+		"allowImportingTsExtensions": true
 	},
 	"include": ["./index.ts"],
 	"exclude": ["./**/*.d.ts"]

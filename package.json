@@ -11,7 +11,8 @@
   "dependencies": {
     "@types/node": "^22.7.4",
     "fontoxpath": "^3.33.0",
-    "slimdom": "^4.3.5"
+    "slimdom": "^4.3.5",
+    "xq-parser": "^0.5.1"
   },
   "type": "module",
   "devDependencies": {
